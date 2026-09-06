@@ -7,7 +7,7 @@ diagnosis into the next incident.
 
 | Learn | Build | Test |
 | --- | --- | --- |
-| [Chapter](README.md) | [Guided notebook](10_langgraph_state.ipynb) · [shared implementation](lab.py) | [32 policy invariants](../../../tests/test_langgraph_state_memory.py) |
+| [Chapter](README.md) | [Guided notebook](10_langgraph_state.ipynb) · [shared implementation](lab.py) | [42 policy invariants](../../../tests/test_langgraph_state_memory.py) |
 
 
 ## Why this topic matters
@@ -76,6 +76,7 @@ the schema deliberate:
 | `hypothesis`, `confidence` | makes routing inspectable | hidden chain-of-thought |
 | `attempts_by_node`, tool/retry/replan/reflection budgets, deadline | bounds looping and cost across restart | a reset-on-resume counter |
 | `pending_approval` | binds an immutable proposal to the pause | `approved=True` |
+| `approval_audit`, `external_action_receipt_id` | distinguishes validated approval from an executed action | bearer credentials or an implied commit |
 | `state_schema_version`, `graph_version`, `policy_version` | makes compatibility and revalidation explicit | credentials or bearer approval tokens |
 
 ```python
@@ -166,6 +167,17 @@ size budget, and keeps historical records immutable. `InMemorySaver` is useful
 for development/tests and is lost with the process; it is not SQLite. LangGraph's
 SQLite and PostgreSQL savers are separate packages/backends.
 
+Checkpoint lookup is scoped in the storage query by checkpoint ID, trusted
+thread, tenant, and owner. Authorization is checked again after deserialization
+as defense in depth. A missing or differently owned row produces the same
+`CHECKPOINT_NOT_FOUND_OR_DENIED` result so the lookup does not disclose whether
+another tenant's checkpoint exists.
+
+The SHA-256 `state_digest` detects accidental corruption and gives a stable trace
+identity. It is **not** proof of authenticity against an attacker who can rewrite
+both state and digest. Production integrity depends on trusted storage controls
+and, where the threat model requires it, a keyed HMAC or signature.
+
 ### Replay-safe reducers and evidence independence
 
 Evidence is compact: stable ID, source/version, timestamp, summary, artifact
@@ -175,9 +187,10 @@ hash. Confidence uses independent correlation groups, so replaying one log item
 cannot masquerade as corroboration.
 
 Conflicting independent root-cause evidence terminates as
-`NEEDS_HUMAN_REVIEW`. Other explicit terminal states are `COMPLETED`,
-`INTERRUPTED`, `BUDGET_EXHAUSTED`, `MIGRATION_REQUIRED`, `CANCELLED`, and
-`FAILED`.
+`NEEDS_HUMAN_REVIEW`. Other explicit terminal states include `COMPLETED`,
+`INTERRUPTED`, `BUDGET_EXHAUSTED`, `MIGRATION_REQUIRED`, `CANCELLED`,
+`APPROVED_FOR_EXECUTION`, and `FAILED`. The approval status is not an action
+receipt.
 
 ## 4. Long-term memory needs a write policy
 
@@ -205,14 +218,26 @@ temporary credentials are denied. Memory may influence presentation or search
 context; it does not become current-incident evidence without independent
 verification for this run.
 
+`verified=True` is only a claim in a write request. `write()` also requires a
+trusted, application-created `VerifierContext`, checks its tenant, role, scope,
+and identity, and binds `verified_by` to that authenticated verifier. Model output
+cannot self-certify durable memory.
+
+This course chooses **permanent supersession**: after v2 supersedes v1, v1 never
+silently reappears if v2 expires or is soft-deleted. The store retains minimal
+lineage metadata even after eligible content is physically purged. New versions
+must name an existing predecessor with the same tenant, subject, memory type,
+and source lineage, use the next version number, and cannot branch an already
+superseded predecessor.
+
 ### Memory experiment
 
 1. Store a verified Northstar preference: “prioritize clear impact updates.”
 2. Store an unverified claim: “Checkout problems are usually Redis.”
-3. Run the same evidence collection twice—once with the verification gate, once
-   after deliberately bypassing it.
-4. Explain why the evidence-backed deployment hypothesis should win, and add a
-   policy test that prevents the hunch entering the prompt/context.
+3. Attempt to self-certify a write without `VerifierContext` and observe the
+   deterministic denial.
+4. Explain why the evidence-backed deployment hypothesis wins, and confirm the
+   hunch never enters the incident evidence set.
 
 ## 5. Human interrupts and stateful approval
 
@@ -239,14 +264,17 @@ the direct LangGraph equivalent. The correct production sequence is:
 2. checkpoint the proposal and a non-sensitive review payload;
 3. authenticate and authorize the approver in the application layer;
 4. verify tenant, approver, action, target, proposal digest, policy version, and
-   expiry against the current state;
+   expiry against the current state; also require the decision timestamp to fall
+   between proposal creation and expiry and not be in the future;
 5. resume the same authorized thread with `Command(resume=...)`;
 6. perform an idempotent external action only after approval.
 
 The core lab stops after validation and never executes rollback. A decision for
 `deploy-1842` cannot authorize a changed `deploy-1843` proposal; an expired
 decision or a decision arriving after `CANCELLED` is denied. Course 03 owns the
-full executor boundary.
+full executor boundary. Successful validation persists only a non-secret
+`ApprovalAuditReference` and enters `APPROVED_FOR_EXECUTION`; the separate
+`external_action_receipt_id` remains empty.
 
 ### Replay and time travel
 
@@ -254,7 +282,9 @@ LangGraph resumes an interrupted node from its beginning, so code before
 `interrupt()` can run again. The notebook contrasts a bad pre-interrupt side
 effect, which commits twice, with a deterministic receipt fixture: the
 `logical_operation_id` remains stable across resume/retry, while every
-`attempt_id` is unique. See Courses 01 and 03 for the complete executor pattern.
+`attempt_id` is unique. In this fixture, `ExecutionMode.LIVE` means **simulated
+external-commit semantics only**; no production system is called. See Courses 01
+and 03 for the complete executor pattern.
 
 Time travel is a **fork**, not an edit to historical state. A fork records its
 `parent_checkpoint_id`, receives a new thread/run identity, clears stale
@@ -271,6 +301,14 @@ retrieval, while audit-retained records cannot be casually deleted. Acquire
 fresh credentials at resume time—never serialize API tokens, passwords,
 temporary cloud credentials, or bearer approval tokens.
 
+Deletion has two stages. A normal delete is a **soft delete**: retrieval is
+blocked immediately, but the payload remains for recovery or audit workflows.
+`purge_expired_or_deleted()` physically removes eligible non-`AUDIT` checkpoint
+or memory payloads after their retention conditions are satisfied. Audit records
+remain governed by their separate retention process. Purge requires the explicit
+scope held by the fixture's trusted retention-worker context, not the ordinary
+operator context. Soft deletion is not physical erasure.
+
 ## 6. Streaming, observability, and evaluation
 
 Streaming is useful for an operator console when it exposes intentional events:
@@ -284,7 +322,10 @@ that with trace/evaluation tooling to inspect the trajectory
 The shared `StreamEvent` records run/thread/checkpoint correlation, sequence,
 timestamp, node, and type. `project_stream_event()` exposes only node, status,
 elapsed time, and a safe summary. Raw logs, PII, credentials, and hidden reasoning
-remain outside the UI projection.
+remain outside the UI projection. The fixture's small regex check catches a few
+obvious mistakes, but it is intentionally incomplete and is not a production DLP
+system. The primary boundary is constructing a narrow safe projection; production
+systems also need classified schemas, access control, and tested redaction/DLP.
 
 For the Northstar system, test more than the final diagnosis:
 
@@ -323,6 +364,7 @@ free but avoids repeating completed tool calls, cost, and latency after restart.
 | Local durable experiment | separate `langgraph-checkpoint-sqlite` saver | treat SQLite as local/single-process infrastructure |
 | Cross-thread store | `InMemoryStore` | PostgreSQL, MongoDB, Redis, or an application store with explicit namespaces |
 | Serialization | typed state and default safe serializer | encrypted serializer, key management, migrations, and restore tests |
+| Deletion | soft-delete tombstone + explicit purge fixture | retention scheduler, legal hold, purge evidence, and backup lifecycle |
 
 Storage mechanism does not define memory semantics: long-term memory may use KV,
 relational, document, vector, or hybrid retrieval. Namespace and authorize it by

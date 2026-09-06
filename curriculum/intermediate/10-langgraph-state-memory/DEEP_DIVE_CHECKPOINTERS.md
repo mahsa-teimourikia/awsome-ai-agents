@@ -22,6 +22,11 @@ The thread ID selects persistent execution state. It is not a bearer token. An
 attacker who guesses or obtains a thread ID must still fail the application’s
 tenant, owner, scope, and retention checks.
 
+Scope the database query itself with the trusted checkpoint ID, thread, tenant,
+and owner rather than fetching a foreign payload and filtering later. Recheck the
+decoded record as defense in depth. For user-facing lookup paths, return one
+not-found-or-denied result so callers cannot probe checkpoint existence.
+
 ## Checkpointer choices
 
 | Backend | Appropriate use | Important boundary |
@@ -34,6 +39,10 @@ tenant, owner, scope, and retention checks.
 LangGraph’s default `JsonPlusSerializer` uses msgpack/JSON-compatible handling
 for supported types. Do not enable arbitrary untrusted object deserialization.
 Where required, use an encrypted serializer and manage keys outside graph state.
+A plain SHA-256 state digest helps detect accidental corruption and correlate a
+trace. It does not authenticate data when an attacker can rewrite storage and the
+digest together; use trusted storage controls or keyed HMAC/signatures when the
+threat model requires cryptographic authenticity.
 
 ## Recovery is persisted execution state, not “resume at line 8”
 
@@ -77,6 +86,12 @@ decision against the current proposal. Bind tenant, action, target, proposal
 digest, policy version, expiry, and approver. Never treat `approved=True` or
 knowledge of the thread ID as sufficient authority.
 
+Validate that `decided_at` is not before proposal creation, after proposal
+expiry, or in the future relative to validation. After validation, persist a
+non-secret decision/audit reference and use an explicit
+`APPROVED_FOR_EXECUTION` state. That state is not evidence that an external
+action committed; only a separate idempotent execution receipt can establish it.
+
 An interrupted node restarts from its beginning on resume. Code before
 `interrupt()` can execute again. Keep pre-interrupt work pure or idempotent; put
 consequential writes behind validated approval and a stable logical operation
@@ -115,6 +130,17 @@ A vector database is one retrieval mechanism, not the definition of long-term
 memory. Semantic memory is never globally available merely because it embeds
 well. Every query still needs namespace and authorization checks.
 
+Verification is also application-owned. A model-supplied `verified=True` and
+reviewer name do not prove anything without a trusted verifier identity, tenant,
+role, and scope. Course 10 chooses permanent supersession: once a successor is
+accepted, its predecessor cannot silently reappear when the successor expires or
+is deleted. Lineage metadata survives content purge.
+
+Soft deletion only blocks normal retrieval; it does not erase retained bytes.
+An explicit retention worker must physically purge eligible non-audit checkpoint
+and memory payloads, handle backups, and record purge evidence. Legal hold and
+audit-retained data use a separate authorized lifecycle.
+
 ## Production checklist
 
 - Keep raw logs and large payloads in artifact storage; persist handles, hashes,
@@ -125,6 +151,8 @@ well. Every query still needs namespace and authorization checks.
 - Reacquire secrets and short-lived credentials on resume.
 - Emit correlated events but project only safe node/status/timing summaries to
   users.
+- Treat the fixture's summary regex as a regression tripwire, not a production
+  DLP system; enforce narrow schemas and tested redaction at the projection edge.
 - Measure resume success, duplicate work, replayed side effects, save latency,
   state size, memory contamination, cross-tenant results, stale approvals, and
   stream-redaction failures.

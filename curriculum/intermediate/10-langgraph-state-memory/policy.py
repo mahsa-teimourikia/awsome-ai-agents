@@ -49,6 +49,7 @@ class TerminalStatus(str, Enum):
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
     CANCELLED = "CANCELLED"
+    APPROVED_FOR_EXECUTION = "APPROVED_FOR_EXECUTION"
     FAILED = "FAILED"
 
 
@@ -68,6 +69,10 @@ class MemoryType(str, Enum):
     SEMANTIC = "SEMANTIC"
     PREFERENCE = "PREFERENCE"
     PROCEDURAL = "PROCEDURAL"
+
+
+class SupersessionPolicy(str, Enum):
+    PERMANENT = "PERMANENT"
 
 
 class MemoryOrigin(str, Enum):
@@ -221,9 +226,20 @@ class ApproverContext(FrozenModel):
     authorization_scope: tuple[str, ...] = Field(min_length=1)
 
 
-class ValidatedApproval(FrozenModel):
+class VerifierContext(FrozenModel):
+    """Trusted application identity authorized to verify a memory write."""
+
+    tenant_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    verifier_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    roles: tuple[str, ...] = Field(min_length=1)
+    authorization_scope: tuple[str, ...] = Field(min_length=1)
+
+
+class ApprovalAuditReference(FrozenModel):
+    approval_record_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    decision_id: str = Field(pattern=IDENTIFIER_PATTERN)
     proposal_digest: str = Field(pattern=HEX_64_PATTERN)
-    approver_id: str = Field(pattern=IDENTIFIER_PATTERN)
+    validated_approver_id: str = Field(pattern=IDENTIFIER_PATTERN)
     logical_operation_id: str = Field(pattern=IDENTIFIER_PATTERN)
     validated_at: datetime
 
@@ -244,6 +260,10 @@ class IncidentState(FrozenModel):
     reflection_budget_remaining: int = Field(default=1, ge=0)
     deadline_at: datetime
     pending_approval: ApprovalProposal | None = None
+    approval_audit: ApprovalAuditReference | None = None
+    external_action_receipt_id: str | None = Field(
+        default=None, pattern=IDENTIFIER_PATTERN
+    )
     terminal_status: TerminalStatus = TerminalStatus.RUNNING
     last_checkpoint_id: str | None = Field(default=None, pattern=IDENTIFIER_PATTERN)
     completed_nodes: tuple[str, ...] = ()
@@ -337,6 +357,10 @@ class SQLiteCheckpointRepository:
             "CREATE INDEX IF NOT EXISTS idx_checkpoint_thread "
             "ON checkpoints(thread_id, sequence)"
         )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_checkpoint_owner "
+            "ON checkpoints(thread_id, tenant_id, owner_user_id, sequence)"
+        )
         self.connection.commit()
 
     def close(self) -> None:
@@ -364,8 +388,9 @@ class SQLiteCheckpointRepository:
         _require_aware(created_at)
         checkpoint_id = f"cp-{uuid.uuid4().hex}"
         next_sequence = self.connection.execute(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM checkpoints WHERE thread_id = ?",
-            (context.thread_id,),
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM checkpoints "
+            "WHERE thread_id = ? AND tenant_id = ? AND owner_user_id = ?",
+            (context.thread_id, context.tenant_id, context.user_id),
         ).fetchone()[0]
         saved_state = state.model_copy(update={"last_checkpoint_id": checkpoint_id})
         state_json = saved_state.model_dump_json()
@@ -413,16 +438,24 @@ class SQLiteCheckpointRepository:
     ) -> sqlite3.Row:
         if checkpoint_id:
             row = self.connection.execute(
-                "SELECT * FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,)
+                "SELECT * FROM checkpoints WHERE checkpoint_id = ? "
+                "AND thread_id = ? AND tenant_id = ? AND owner_user_id = ?",
+                (
+                    checkpoint_id,
+                    context.thread_id,
+                    context.tenant_id,
+                    context.user_id,
+                ),
             ).fetchone()
         else:
             row = self.connection.execute(
                 "SELECT * FROM checkpoints WHERE thread_id = ? "
+                "AND tenant_id = ? AND owner_user_id = ? "
                 "ORDER BY sequence DESC LIMIT 1",
-                (context.thread_id,),
+                (context.thread_id, context.tenant_id, context.user_id),
             ).fetchone()
         if row is None:
-            raise PolicyError("CHECKPOINT_NOT_FOUND")
+            raise PolicyError("CHECKPOINT_NOT_FOUND_OR_DENIED")
         return row
 
     def _authorize_record(
@@ -457,6 +490,7 @@ class SQLiteCheckpointRepository:
         now: datetime | None = None,
     ) -> CheckpointSnapshot:
         current_time = now or datetime.now(timezone.utc)
+        self._require_scope(context, "checkpoint:read")
         row = self._row_for_context(context, checkpoint_id)
         record = CheckpointRecord.model_validate_json(row["record_json"])
         self._authorize_record(
@@ -483,9 +517,11 @@ class SQLiteCheckpointRepository:
         self, context: ThreadContext, *, now: datetime | None = None
     ) -> tuple[CheckpointRecord, ...]:
         current_time = now or datetime.now(timezone.utc)
+        self._require_scope(context, "checkpoint:read")
         rows = self.connection.execute(
-            "SELECT * FROM checkpoints WHERE thread_id = ? ORDER BY sequence",
-            (context.thread_id,),
+            "SELECT * FROM checkpoints WHERE thread_id = ? "
+            "AND tenant_id = ? AND owner_user_id = ? ORDER BY sequence",
+            (context.thread_id, context.tenant_id, context.user_id),
         ).fetchall()
         records: list[CheckpointRecord] = []
         for row in rows:
@@ -520,6 +556,8 @@ class SQLiteCheckpointRepository:
             update={
                 "execution_mode": ExecutionMode.REPLAY,
                 "pending_approval": None,
+                "approval_audit": None,
+                "external_action_receipt_id": None,
                 "terminal_status": TerminalStatus.RUNNING,
                 "last_checkpoint_id": None,
                 "run_id": f"run-{uuid.uuid4().hex}",
@@ -548,6 +586,42 @@ class SQLiteCheckpointRepository:
             (checkpoint_id, deleted_at.isoformat()),
         )
         self.connection.commit()
+
+    def purge_expired_or_deleted(
+        self,
+        context: ThreadContext,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically erase eligible payloads in one trusted ownership scope."""
+
+        self._require_scope(context, "checkpoint:purge")
+        current_time = now or datetime.now(timezone.utc)
+        rows = self.connection.execute(
+            "SELECT c.*, t.deleted_at AS tombstone_deleted_at "
+            "FROM checkpoints AS c LEFT JOIN checkpoint_tombstones AS t "
+            "ON c.checkpoint_id = t.checkpoint_id "
+            "WHERE c.thread_id = ? AND c.tenant_id = ? AND c.owner_user_id = ?",
+            (context.thread_id, context.tenant_id, context.user_id),
+        ).fetchall()
+        purge_ids = []
+        for row in rows:
+            record = CheckpointRecord.model_validate_json(row["record_json"])
+            eligible = row["tombstone_deleted_at"] is not None or (
+                current_time > record.expires_at
+            )
+            if eligible and record.retention_class != RetentionClass.AUDIT:
+                purge_ids.append(record.checkpoint_id)
+        with self.connection:
+            self.connection.executemany(
+                "DELETE FROM checkpoints WHERE checkpoint_id = ?",
+                ((checkpoint_id,) for checkpoint_id in purge_ids),
+            )
+            self.connection.executemany(
+                "DELETE FROM checkpoint_tombstones WHERE checkpoint_id = ?",
+                ((checkpoint_id,) for checkpoint_id in purge_ids),
+            )
+        return len(purge_ids)
 
 
 class MemoryRecord(FrozenModel):
@@ -586,6 +660,8 @@ class MemoryRecord(FrozenModel):
 
 
 class MemoryWriteRequest(FrozenModel):
+    """Untrusted write request; verification fields are claims until authorized."""
+
     tenant_id: str = Field(pattern=IDENTIFIER_PATTERN)
     subject_id: str = Field(pattern=IDENTIFIER_PATTERN)
     memory_type: MemoryType
@@ -606,6 +682,7 @@ class MemoryWriteRequest(FrozenModel):
 
 
 class MemoryPolicy(FrozenModel):
+    supersession_policy: SupersessionPolicy = SupersessionPolicy.PERMANENT
     allowed_origins: tuple[MemoryOrigin, ...] = (
         MemoryOrigin.USER_CONFIRMED,
         MemoryOrigin.REVIEWED_POSTMORTEM,
@@ -627,6 +704,7 @@ class GovernedMemoryStore:
     def __init__(self, policy: MemoryPolicy | None = None):
         self.policy = policy or MemoryPolicy()
         self._records: dict[str, MemoryRecord] = {}
+        self._superseded_memory_ids: dict[str, str] = {}
 
     @staticmethod
     def _require_scope(context: ThreadContext, scope: str) -> None:
@@ -638,6 +716,7 @@ class GovernedMemoryStore:
         context: ThreadContext,
         request: MemoryWriteRequest,
         *,
+        verifier: VerifierContext | None = None,
         now: datetime | None = None,
         memory_id: str | None = None,
     ) -> MemoryRecord:
@@ -649,6 +728,16 @@ class GovernedMemoryStore:
             raise PolicyError("MEMORY_WRITE_DENIED")
         if not request.verified or not request.verified_by:
             raise PolicyError("MEMORY_WRITE_DENIED")
+        if verifier is None:
+            raise PolicyError("MEMORY_VERIFIER_REQUIRED")
+        if verifier.tenant_id != context.tenant_id:
+            raise PolicyError("MEMORY_VERIFIER_TENANT_DENIED")
+        if "memory_verifier" not in verifier.roles:
+            raise PolicyError("MEMORY_VERIFIER_ROLE_DENIED")
+        if "memory:verify" not in verifier.authorization_scope:
+            raise PolicyError("MEMORY_VERIFIER_SCOPE_DENIED")
+        if request.verified_by != verifier.verifier_id:
+            raise PolicyError("MEMORY_VERIFIER_ID_MISMATCH")
         if any(marker in lowered for marker in self.policy.forbidden_markers):
             raise PolicyError("MEMORY_WRITE_DENIED")
         if request.memory_type == MemoryType.PREFERENCE and (
@@ -670,9 +759,14 @@ class GovernedMemoryStore:
                 previous.tenant_id != request.tenant_id
                 or previous.subject_id != request.subject_id
                 or previous.memory_type != request.memory_type
-                or request.version <= previous.version
+                or previous.source_id != request.source_id
+                or request.version != previous.version + 1
             ):
                 raise PolicyError("INVALID_MEMORY_SUPERSESSION")
+            if previous.memory_id in self._superseded_memory_ids:
+                raise PolicyError("MEMORY_LINEAGE_ALREADY_SUPERSEDED")
+        elif request.version != 1:
+            raise PolicyError("MEMORY_LINEAGE_PREDECESSOR_REQUIRED")
         record = MemoryRecord(
             memory_id=memory_id or f"memory-{uuid.uuid4().hex}",
             created_at=created_at,
@@ -681,6 +775,8 @@ class GovernedMemoryStore:
         if record.memory_id in self._records:
             raise PolicyError("MEMORY_ID_CONFLICT")
         self._records[record.memory_id] = record
+        if record.supersedes:
+            self._superseded_memory_ids[record.supersedes] = record.tenant_id
         return record
 
     def retrieve(
@@ -693,11 +789,10 @@ class GovernedMemoryStore:
     ) -> tuple[MemoryRecord, ...]:
         self._require_scope(context, "memory:read")
         current_time = now or datetime.now(timezone.utc)
-        active_superseded_ids = {
-            record.supersedes
-            for record in self._records.values()
-            if record.supersedes
-            and record.tenant_id == context.tenant_id
+        permanently_superseded_ids = {
+            memory_id
+            for memory_id, tenant_id in self._superseded_memory_ids.items()
+            if tenant_id == context.tenant_id
         }
         allowed_types = set(memory_types) if memory_types else set(MemoryType)
         records = [
@@ -709,7 +804,7 @@ class GovernedMemoryStore:
             and record.verified
             and record.deleted_at is None
             and current_time <= record.expires_at
-            and record.memory_id not in active_superseded_ids
+            and record.memory_id not in permanently_superseded_ids
         ]
         return tuple(
             sorted(records, key=lambda item: (item.relevance_score, item.version), reverse=True)
@@ -732,10 +827,33 @@ class GovernedMemoryStore:
             update={"deleted_at": now or datetime.now(timezone.utc)}
         )
 
+    def purge_expired_or_deleted(
+        self,
+        context: ThreadContext,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically erase eligible non-audit memory payloads for one tenant."""
+
+        self._require_scope(context, "memory:purge")
+        current_time = now or datetime.now(timezone.utc)
+        purge_ids = [
+            record.memory_id
+            for record in self._records.values()
+            if record.tenant_id == context.tenant_id
+            and record.retention_class != RetentionClass.AUDIT
+            and (record.deleted_at is not None or current_time > record.expires_at)
+        ]
+        for memory_id in purge_ids:
+            del self._records[memory_id]
+        return len(purge_ids)
+
     def seed_fixture(self, record: MemoryRecord) -> None:
         """Load synthetic evaluation data without implying it passed write policy."""
 
         self._records[record.memory_id] = record
+        if record.supersedes:
+            self._superseded_memory_ids[record.supersedes] = record.tenant_id
 
 
 def validate_approval_decision(
@@ -745,7 +863,7 @@ def validate_approval_decision(
     context: ThreadContext,
     *,
     now: datetime | None = None,
-) -> ValidatedApproval:
+) -> ApprovalAuditReference:
     if state.terminal_status == TerminalStatus.CANCELLED:
         raise PolicyError("CANCELLED_RUN")
     proposal = state.pending_approval
@@ -766,6 +884,12 @@ def validate_approval_decision(
         raise PolicyError("POLICY_REVALIDATION_REQUIRED")
     if decision.proposal_expires_at != proposal.expires_at:
         raise PolicyError("APPROVAL_EXPIRY_MISMATCH")
+    if decision.decided_at < proposal.created_at:
+        raise PolicyError("APPROVAL_DECISION_BEFORE_PROPOSAL")
+    if decision.decided_at > proposal.expires_at:
+        raise PolicyError("APPROVAL_DECISION_AFTER_EXPIRY")
+    if decision.decided_at > current_time:
+        raise PolicyError("APPROVAL_DECISION_IN_FUTURE")
     if current_time > proposal.expires_at:
         raise PolicyError("APPROVAL_EXPIRED")
     if decision.proposal_digest != proposal.digest:
@@ -778,9 +902,11 @@ def validate_approval_decision(
         raise PolicyError("APPROVER_SCOPE_DENIED")
     if decision.decision != DecisionType.APPROVE:
         raise PolicyError("APPROVAL_REJECTED")
-    return ValidatedApproval(
+    return ApprovalAuditReference(
+        approval_record_id=f"approval-record-{decision.decision_id}",
+        decision_id=decision.decision_id,
         proposal_digest=proposal.digest,
-        approver_id=approver.approver_id,
+        validated_approver_id=approver.approver_id,
         logical_operation_id=proposal.logical_operation_id,
         validated_at=current_time,
     )
@@ -794,7 +920,7 @@ class MockExecutionReceipt(FrozenModel):
 
 
 class IdempotentMockExecutor:
-    """A receipt-only teaching fixture; it performs no real external action."""
+    """Receipt-only fixture; LIVE simulates commit semantics, never a real action."""
 
     def __init__(self):
         self._receipts: dict[str, MockExecutionReceipt] = {}
@@ -847,7 +973,7 @@ class ReplayExperiment(FrozenModel):
 
 
 def run_replay_experiment() -> ReplayExperiment:
-    """Contrast a pre-interrupt side effect with receipt-backed idempotency."""
+    """Contrast replay behavior using simulated LIVE commits only."""
 
     logical_id = "rollback-northstar-deploy-1842"
     attempt_ids = ("attempt-before-interrupt", "attempt-after-resume")

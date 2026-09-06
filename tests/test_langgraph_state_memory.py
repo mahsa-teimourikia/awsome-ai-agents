@@ -58,6 +58,30 @@ def interrupted_runtime(repository, context):
     return runtime
 
 
+def preference_request(
+    *,
+    version: int,
+    expires_in_days: int,
+    supersedes: str | None = None,
+    source_id: str = "user-confirmation-17",
+) -> policy.MemoryWriteRequest:
+    return policy.MemoryWriteRequest(
+        tenant_id="northstar",
+        subject_id="checkout-eu",
+        memory_type=policy.MemoryType.PREFERENCE,
+        content=f"Preference version {version}.",
+        source_id=source_id,
+        source_version=f"v{version}",
+        origin=policy.MemoryOrigin.USER_CONFIRMED,
+        verified=True,
+        verified_by="operator-17",
+        expires_at=lab.FIXED_TIME + timedelta(days=expires_in_days),
+        sensitivity=policy.Sensitivity.INTERNAL,
+        version=version,
+        supersedes=supersedes,
+    )
+
+
 def test_contracts_forbid_extra_fields_and_state_is_frozen():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         policy.ThreadContext(
@@ -110,7 +134,7 @@ def test_thread_id_is_not_authority_across_tenants(tmp_path):
         thread_id="thread-globex-incident",
     )
 
-    with pytest.raises(policy.PolicyError, match="THREAD_ACCESS_DENIED"):
+    with pytest.raises(policy.PolicyError, match="CHECKPOINT_NOT_FOUND_OR_DENIED"):
         repo.load(attacker, now=lab.FIXED_TIME)
     repo.close()
 
@@ -120,7 +144,7 @@ def test_wrong_user_and_missing_scope_are_denied(repository, context):
     wrong_user = lab.build_context(user_id="operator-99")
     no_read = lab.build_context(scopes=("checkpoint:write",))
 
-    with pytest.raises(policy.PolicyError, match="USER_ACCESS_DENIED"):
+    with pytest.raises(policy.PolicyError, match="CHECKPOINT_NOT_FOUND_OR_DENIED"):
         repository.load(wrong_user, now=lab.FIXED_TIME)
     with pytest.raises(policy.PolicyError, match="AUTHORIZATION_SCOPE_DENIED"):
         repository.load(no_read, now=lab.FIXED_TIME)
@@ -212,6 +236,54 @@ def test_expired_approval_is_denied(interrupted_runtime):
         )
 
 
+def test_approval_decision_cannot_predate_proposal(interrupted_runtime):
+    proposal = interrupted_runtime.state.pending_approval
+    decision = lab.build_decision(
+        proposal, decided_at=proposal.created_at - timedelta(seconds=1)
+    )
+
+    with pytest.raises(policy.PolicyError, match="APPROVAL_DECISION_BEFORE_PROPOSAL"):
+        policy.validate_approval_decision(
+            interrupted_runtime.state,
+            decision,
+            lab.build_approver(),
+            interrupted_runtime.context,
+            now=proposal.created_at,
+        )
+
+
+def test_approval_decision_cannot_be_issued_after_expiry(interrupted_runtime):
+    proposal = interrupted_runtime.state.pending_approval
+    decision = lab.build_decision(
+        proposal, decided_at=proposal.expires_at + timedelta(seconds=1)
+    )
+
+    with pytest.raises(policy.PolicyError, match="APPROVAL_DECISION_AFTER_EXPIRY"):
+        policy.validate_approval_decision(
+            interrupted_runtime.state,
+            decision,
+            lab.build_approver(),
+            interrupted_runtime.context,
+            now=proposal.expires_at + timedelta(seconds=2),
+        )
+
+
+def test_approval_decision_cannot_be_from_the_future(interrupted_runtime):
+    proposal = interrupted_runtime.state.pending_approval
+    decision = lab.build_decision(
+        proposal, decided_at=lab.FIXED_TIME + timedelta(minutes=10)
+    )
+
+    with pytest.raises(policy.PolicyError, match="APPROVAL_DECISION_IN_FUTURE"):
+        policy.validate_approval_decision(
+            interrupted_runtime.state,
+            decision,
+            lab.build_approver(),
+            interrupted_runtime.context,
+            now=lab.FIXED_TIME + timedelta(minutes=9),
+        )
+
+
 def test_wrong_approver_is_denied(interrupted_runtime):
     proposal = interrupted_runtime.state.pending_approval
     decision = lab.build_decision(proposal)
@@ -246,9 +318,19 @@ def test_valid_approval_completes_handoff_but_executes_nothing(interrupted_runti
         now=lab.FIXED_TIME + timedelta(minutes=10),
     )
 
-    assert state.terminal_status == policy.TerminalStatus.COMPLETED
+    assert state.terminal_status == policy.TerminalStatus.APPROVED_FOR_EXECUTION
     assert state.pending_approval is None
+    assert state.external_action_receipt_id is None
+    assert state.approval_audit.decision_id == decision.decision_id
+    assert state.approval_audit.validated_approver_id == "commander-8"
     assert "approval-validated" in state.completed_nodes
+    reloaded = interrupted_runtime.repository.load(
+        interrupted_runtime.context,
+        state.last_checkpoint_id,
+        now=lab.FIXED_TIME + timedelta(minutes=10),
+    )
+    assert reloaded.state.approval_audit == state.approval_audit
+    assert reloaded.state.external_action_receipt_id is None
 
 
 def test_resume_revalidates_policy_version(repository, context):
@@ -346,14 +428,117 @@ def test_memory_supersession_returns_only_active_version(context):
     assert [item.version for item in results] == [2]
 
 
+def test_supersession_is_permanent_after_successor_expiry_or_delete(context):
+    verifier = lab.build_verifier()
+
+    expired_store = policy.GovernedMemoryStore()
+    assert (
+        expired_store.policy.supersession_policy
+        == policy.SupersessionPolicy.PERMANENT
+    )
+    old = expired_store.write(
+        context,
+        preference_request(version=1, expires_in_days=90),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-permanent-old-expiry",
+    )
+    expired_store.write(
+        context,
+        preference_request(
+            version=2, expires_in_days=1, supersedes=old.memory_id
+        ),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-permanent-new-expiry",
+    )
+    assert expired_store.retrieve(
+        context,
+        subject_id="checkout-eu",
+        now=lab.FIXED_TIME + timedelta(days=2),
+    ) == ()
+
+    deleted_store = policy.GovernedMemoryStore()
+    old = deleted_store.write(
+        context,
+        preference_request(version=1, expires_in_days=90),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-permanent-old-delete",
+    )
+    current = deleted_store.write(
+        context,
+        preference_request(
+            version=2, expires_in_days=90, supersedes=old.memory_id
+        ),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-permanent-new-delete",
+    )
+    deleted_store.delete(context, current.memory_id, now=lab.FIXED_TIME)
+    assert deleted_store.retrieve(
+        context, subject_id="checkout-eu", now=lab.FIXED_TIME
+    ) == ()
+
+
+def test_supersession_rejects_malformed_or_branched_lineage(context):
+    store = policy.GovernedMemoryStore()
+    verifier = lab.build_verifier()
+    old = store.write(
+        context,
+        preference_request(version=1, expires_in_days=90),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-lineage-v1",
+    )
+    with pytest.raises(policy.PolicyError, match="INVALID_MEMORY_SUPERSESSION"):
+        store.write(
+            context,
+            preference_request(
+                version=3,
+                expires_in_days=90,
+                supersedes=old.memory_id,
+                source_id="different-source",
+            ),
+            verifier=verifier,
+            now=lab.FIXED_TIME,
+        )
+    store.write(
+        context,
+        preference_request(version=2, expires_in_days=90, supersedes=old.memory_id),
+        verifier=verifier,
+        now=lab.FIXED_TIME,
+        memory_id="memory-lineage-v2",
+    )
+    with pytest.raises(policy.PolicyError, match="MEMORY_LINEAGE_ALREADY_SUPERSEDED"):
+        store.write(
+            context,
+            preference_request(version=2, expires_in_days=90, supersedes=old.memory_id),
+            verifier=verifier,
+            now=lab.FIXED_TIME,
+        )
+
+
 def test_memory_poisoning_is_denied(context):
     store = policy.GovernedMemoryStore()
     with pytest.raises(policy.PolicyError, match="MEMORY_WRITE_DENIED"):
         store.write(
             context,
             lab.memory_poisoning_request(),
+            verifier=lab.build_verifier(),
             now=lab.FIXED_TIME,
         )
+
+
+def test_memory_boolean_cannot_self_certify_without_trusted_verifier(context):
+    store = policy.GovernedMemoryStore()
+    request = lab.self_certified_memory_request()
+
+    with pytest.raises(policy.PolicyError, match="MEMORY_VERIFIER_REQUIRED"):
+        store.write(context, request, now=lab.FIXED_TIME)
+    assert store.retrieve(
+        context, subject_id="checkout-eu", now=lab.FIXED_TIME
+    ) == ()
 
 
 def test_deleted_memory_is_unavailable(context):
@@ -362,6 +547,26 @@ def test_deleted_memory_is_unavailable(context):
     store.delete(context, current.memory_id, now=lab.FIXED_TIME)
     results = store.retrieve(context, subject_id="checkout-eu", now=lab.FIXED_TIME)
     assert current.memory_id not in {item.memory_id for item in results}
+
+
+def test_memory_soft_delete_requires_explicit_physical_purge(context):
+    store = policy.GovernedMemoryStore()
+    old, current = lab.seed_memory_store(store, context)
+    store.delete(context, current.memory_id, now=lab.FIXED_TIME)
+
+    assert current.memory_id in store._records
+    with pytest.raises(policy.PolicyError, match="AUTHORIZATION_SCOPE_DENIED"):
+        store.purge_expired_or_deleted(context, now=lab.FIXED_TIME)
+    purged = store.purge_expired_or_deleted(
+        lab.build_retention_context(), now=lab.FIXED_TIME
+    )
+    assert purged == 2  # the soft-deleted preference and seeded expired memory
+    assert current.memory_id not in store._records
+    assert "memory-expired" not in store._records
+    assert old.memory_id in store._records  # retained bytes, but permanently superseded
+    assert store.retrieve(
+        context, subject_id="checkout-eu", now=lab.FIXED_TIME
+    ) == ()
 
 
 def test_memory_cannot_become_incident_evidence_implicitly(repository, context):
@@ -420,6 +625,71 @@ def test_deleted_checkpoint_is_unavailable(repository, context):
     repository.delete(context, state.last_checkpoint_id, now=lab.FIXED_TIME)
 
     with pytest.raises(policy.PolicyError, match="CHECKPOINT_DELETED"):
+        repository.load(context, state.last_checkpoint_id, now=lab.FIXED_TIME)
+
+
+def test_expired_checkpoint_is_unavailable(repository, context):
+    runtime = lab.IncidentRuntime(repository, context)
+    runtime.start()
+    short_lived = repository.save(
+        context,
+        runtime.state,
+        now=lab.FIXED_TIME,
+        retention_seconds=1,
+    )
+
+    with pytest.raises(policy.PolicyError, match="CHECKPOINT_EXPIRED"):
+        repository.load(
+            context,
+            short_lived.record.checkpoint_id,
+            now=lab.FIXED_TIME + timedelta(seconds=2),
+        )
+
+
+def test_audit_checkpoint_cannot_be_deleted_or_purged(repository, context):
+    runtime = lab.IncidentRuntime(repository, context)
+    runtime.start()
+    audit = repository.save(
+        context,
+        runtime.state,
+        now=lab.FIXED_TIME,
+        retention_class=policy.RetentionClass.AUDIT,
+        retention_seconds=1,
+    )
+
+    with pytest.raises(policy.PolicyError, match="AUDIT_RETENTION_REQUIRED"):
+        repository.delete(context, audit.record.checkpoint_id, now=lab.FIXED_TIME)
+    assert repository.purge_expired_or_deleted(
+        lab.build_retention_context(), now=lab.FIXED_TIME + timedelta(seconds=2)
+    ) == 0
+    row = repository.connection.execute(
+        "SELECT state_json FROM checkpoints WHERE checkpoint_id = ?",
+        (audit.record.checkpoint_id,),
+    ).fetchone()
+    assert row is not None
+
+
+def test_checkpoint_soft_delete_requires_explicit_physical_purge(repository, context):
+    runtime = lab.IncidentRuntime(repository, context)
+    state = runtime.start()
+    repository.delete(context, state.last_checkpoint_id, now=lab.FIXED_TIME)
+    retained = repository.connection.execute(
+        "SELECT state_json FROM checkpoints WHERE checkpoint_id = ?",
+        (state.last_checkpoint_id,),
+    ).fetchone()
+
+    assert retained is not None
+    with pytest.raises(policy.PolicyError, match="AUTHORIZATION_SCOPE_DENIED"):
+        repository.purge_expired_or_deleted(context, now=lab.FIXED_TIME)
+    assert repository.purge_expired_or_deleted(
+        lab.build_retention_context(), now=lab.FIXED_TIME
+    ) == 1
+    erased = repository.connection.execute(
+        "SELECT state_json FROM checkpoints WHERE checkpoint_id = ?",
+        (state.last_checkpoint_id,),
+    ).fetchone()
+    assert erased is None
+    with pytest.raises(policy.PolicyError, match="CHECKPOINT_NOT_FOUND_OR_DENIED"):
         repository.load(context, state.last_checkpoint_id, now=lab.FIXED_TIME)
 
 
