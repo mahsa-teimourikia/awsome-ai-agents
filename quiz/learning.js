@@ -183,16 +183,17 @@ export const learningPath = [
   },
   {
     "id": "i10",
-    "title": "State & Memory (LangGraph)",
-    "description": "Design durable memory systems. Utilize native Checkpointers to snapshot graph state, allowing cross-session persistence and human intervention without losing context.",
+    "title": "Governed State, Persistence & Memory",
+    "description": "Build tenant-scoped durable checkpoints, replay-safe resume, structured approval interrupts, governed long-term memory, and redacted event streams.",
     "material": "../curriculum/intermediate/10-langgraph-state-memory/README.md",
     "notebook": "../curriculum/intermediate/10-langgraph-state-memory/10_langgraph_state.ipynb",
     "category": "Intermediate - State & Memory (LangGraph)",
-    "minutes": 60,
+    "minutes": 150,
     "technologies": [
       "Python",
       "Pydantic",
-      "LangGraph"
+      "SQLite",
+      "LangGraph (optional)"
     ]
   },
   {

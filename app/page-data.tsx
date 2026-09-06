@@ -880,25 +880,28 @@ export const curriculumData:Subject[] = [
     "id": "i10",
     "level": "Intermediate",
     "step": "10",
-    "title": "State & Memory (LangGraph)",
-    "description": "Design durable memory systems using native Checkpointers.",
-    "time": "45-60 min",
-    "outcome": "Snapshot graph state for cross-session persistence.",
-    "lesson": "LangGraph Checkpointers.",
-    "exercise": "Resume an interrupted state machine.",
+    "title": "Governed State, Persistence & Memory",
+    "description": "Build a durable, tenant-scoped state and memory subsystem with safe resume, replay, approval, and version boundaries.",
+    "time": "120-180 min",
+    "outcome": "Recover a Northstar incident across process restart without resetting budgets, repeating work, trusting stale approval, or contaminating evidence with memory.",
+    "lesson": "Typed state, durable checkpoints, immutable forks, governed memory, safe streams, and a current LangGraph adapter.",
+    "exercise": "Run a two-process recovery, inject replay and memory failures, and inspect measured safety outcomes.",
     "failures": [
-      "Assumption failure:: The model hallucinates an unsupported parameter.",
-      "State leak:: Context is incorrectly preserved across runs.",
-      "Timeout:: The tool takes too long and the agent loops.",
-      "Auth bypass:: The agent attempts an action it shouldn't."
+      "Thread hijacking:: A thread identifier is mistaken for checkpoint authority.",
+      "Replay:: Code before an interrupt repeats a non-idempotent side effect.",
+      "Version drift:: Old state resumes under incompatible graph, schema, or policy versions.",
+      "Memory poisoning:: Unverified or cross-tenant memory enters current evidence.",
+      "Stale approval:: A changed, expired, or cancelled proposal resumes."
     ],
     "notebook": "curriculum/intermediate/10-langgraph-state-memory/10_langgraph_state.ipynb",
     "refs": [
       "curriculum/intermediate/10-langgraph-state-memory/README.md",
-      "curriculum/intermediate/10-langgraph-state-memory/10_langgraph_state.ipynb"
+      "curriculum/intermediate/10-langgraph-state-memory/10_langgraph_state.ipynb",
+      "curriculum/intermediate/10-langgraph-state-memory/lab.py",
+      "curriculum/intermediate/10-langgraph-state-memory/DEEP_DIVE_CHECKPOINTERS.md"
     ],
-    "code": "",
-    "goals": ["Review the theoretical concepts and architecture.","Open the companion notebook and execute the cells.","Trace the execution and observe the output.","Identify the boundary constraints and failure points."],
+    "code": "curriculum/intermediate/10-langgraph-state-memory/lab.py",
+    "goals": ["Separate trusted thread context from model-controlled state.","Resume from durable checkpoints without repeating completed work or resetting budgets.","Bind approval to exact current state and stop before execution.","Fork immutable history into replay-safe dry runs.","Govern memory by provenance, tenant, subject, type, expiry, supersession, and deletion.","Measure recovery, replay, contamination, and stream-redaction outcomes."],
     "quiz": []
   },
   {

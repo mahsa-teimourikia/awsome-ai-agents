@@ -1934,21 +1934,17 @@ export const questions = [
   {
     "id": "chkpt-langgraph_state_memory",
     "category": "State & Memory",
-    "prompt": "Unbound State Growth",
+    "prompt": "Why must a durable agent revalidate identity, policy, and approval when resuming a checkpoint?",
     "options": [
-      "To force the user to write Python.",
-      "To track structured variables (like incident_id) alongside messages, enabling programmatic routing.",
-      "It improves LLM generation speed.",
-      "It bypasses API limits.",
-      "LangGraph will throw a compilation error.",
-      "The list will be immutable.",
-      "Returning a new list from a Node will overwrite the existing list completely, instead of appending to it.",
-      "The LLM will refuse to run."
+      "A thread ID is a bearer token that permanently authorizes every future action.",
+      "Persisted state can outlive the process, policy, credentials, proposal target, and original user session.",
+      "Checkpoint serialization automatically refreshes every expired credential.",
+      "Resume always starts a completely new run with empty budgets."
     ],
     "correct": [
-      6
+      1
     ],
-    "explanation": "Refer to the notebook for the detailed explanation.",
+    "explanation": "A checkpoint preserves execution state, not authority. Resume must re-check tenant/thread ownership, current policy, versions, retention, credentials, and any exact approval binding.",
     "source": {
       "label": "Notebook Checkpoint",
       "url": "curriculum/intermediate/10-langgraph-state-memory/10_langgraph_state.ipynb"
