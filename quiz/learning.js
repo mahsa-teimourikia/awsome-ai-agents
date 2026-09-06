@@ -198,14 +198,16 @@ export const learningPath = [
   },
   {
     "id": "a1",
-    "title": "Single vs multi agent",
-    "description": "Advanced exploration of Single vs multi agent.",
+    "title": "Single vs Multi-Agent Architecture Decisions",
+    "description": "Compare single agents, dynamic tools, pipelines, managers, handoffs, and parallel specialists on one measured incident.",
     "material": "../curriculum/advanced/01-single-vs-multi-agent/README.md",
-    "notebook": null,
-    "category": "Advanced - Single vs multi agent",
-    "minutes": 60,
+    "notebook": "../curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb",
+    "category": "Advanced - Architecture Decisions",
+    "minutes": 120,
     "technologies": [
-      "Python"
+      "Python",
+      "Pydantic",
+      "Deterministic evaluation"
     ]
   },
   {

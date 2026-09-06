@@ -69,7 +69,7 @@ Every topic has a co-located `README.md`, deep dive topics, and self-contained n
 
 | Step | Topic | Learn and run |
 | --- | --- | --- |
-| 01 | [Single vs Multi-Agent Systems](curriculum/advanced/01-single-vs-multi-agent/README.md) | Topologies, coordination, and evidence-based team promotion |
+| 01 | [Single vs Multi-Agent Systems](curriculum/advanced/01-single-vs-multi-agent/README.md) | Architecture decisions, typed coordination, and measured split gates |
 | 02 | [AutoGen Selector Teams](curriculum/advanced/02-autogen-selector-teams/README.md) | Selector-based collaboration and termination controls |
 | 03 | [CrewAI Teams](curriculum/advanced/03-crewai-teams/README.md) | Agents, tasks, crews, flows, and constrained collaboration |
 | 04 | [Hybrid Production Architecture](curriculum/advanced/04-hybrid-production-architecture/README.md) | Route tasks to workflows, agents, or teams with policy/approval controls |

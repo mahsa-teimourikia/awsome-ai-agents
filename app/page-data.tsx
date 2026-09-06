@@ -908,21 +908,41 @@ export const curriculumData:Subject[] = [
     "id": "a1",
     "level": "Advanced",
     "step": "01",
-    "title": "Single vs multi agent",
-    "description": "Advanced exploration of Single vs multi agent.",
-    "time": "45-60 min",
-    "outcome": "Master advanced patterns.",
-    "lesson": "Deep dive into SOTA literature.",
-    "exercise": "Implement complex agentic systems.",
-    "failures": [],
-    "notebook": "curriculum/advanced/01-single-vs-multi-agent/01_single_vs_multi_agent.ipynb",
+    "title": "Single vs Multi-Agent Architecture Decisions",
+    "description": "Measure when a single agent, dynamic tools, pipeline, manager, handoff, or parallel specialists best fits one governed incident.",
+    "time": "120 min",
+    "outcome": "Choose the smallest architecture that satisfies measured quality, security, state, and operational requirements.",
+    "lesson": "Compare six control models with typed artifacts, topology policy, deterministic costs, routing evaluation, and Pareto trade-offs.",
+    "exercise": "Run the same Northstar incident through every architecture and apply the split quality gate.",
+    "failures": [
+      "Privilege laundering:: Delegation expands beyond the authorized parent and request capability intersection.",
+      "State loss:: Required tenant, deploy, tier, region, or incident-window facts disappear during handoff.",
+      "Duplicate coordination:: The same agent, task, inputs, and artifacts are invoked again without new information.",
+      "Unbounded topology:: Cycles, depth, parallelism, cost, or deadline exceed application policy.",
+      "Invalid artifact:: Wrong-tenant, ungrounded, or unverifiable findings enter synthesis."
+    ],
+    "notebook": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb",
     "refs": [
       "curriculum/advanced/01-single-vs-multi-agent/README.md",
-      "curriculum/advanced/01-single-vs-multi-agent/01_single_vs_multi_agent.ipynb"
+      "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb",
+      "curriculum/advanced/01-single-vs-multi-agent/lab.py",
+      "curriculum/advanced/01-single-vs-multi-agent/policy.py",
+      "curriculum/advanced/01-single-vs-multi-agent/ROUTING_AND_HANDOFFS.md"
     ],
-    "code": "",
-    "goals": ["Review the theoretical concepts and architecture.","Open the companion notebook and execute the cells.","Trace the execution and observe the output.","Identify the boundary constraints and failure points."],
-    "quiz": []
+    "code": "curriculum/advanced/01-single-vs-multi-agent/lab.py",
+    "goals": ["Distinguish single, pipeline, manager, handoff, and parallel control semantics.","Validate typed artifacts, topology, capability attenuation, tenancy, and delegation budgets.","Separate aggregate work from wall-clock and critical-path latency.","Evaluate multi-route and unknown routing on a labelled dataset.","Use quality gates and Pareto analysis instead of assuming a team is an upgrade."],
+    "quiz": [
+      {"q":"When are multiple LLM calls not multiple agents?","options":["When they use different prompts","When one deterministic workflow owns state, capabilities, and completion","When one call reviews another","When they use one model"],"answer":1,"explanation":"Multiple calls can be stages in one application-owned pipeline; another prompt alone does not create a distinct control boundary."},
+      {"q":"Who owns control in manager delegation versus handoff?","options":["The manager retains control in both","The specialist owns control in both","The manager retains control for agents-as-tools; handoff changes the active owner","The model provider owns control"],"answer":2,"explanation":"A manager consumes bounded specialist results and synthesizes; a handoff transfers the active turn or workflow phase."},
+      {"q":"Why is parallel wall-clock not the sum of all work?","options":["Parallel work is free","Independent tasks overlap, so a batch follows its slowest task while work remains additive","Tokens are not counted","Tools have zero latency"],"answer":1,"explanation":"Concurrent operations still consume aggregate resources, but their elapsed intervals overlap until the dependent step can begin."},
+      {"q":"Why is an agent boundary not a security boundary?","options":["Agents cannot use tools","Names and prompts do not enforce credentials, authorization, networks, sandboxes, or approval","Only writes need security","Typed outputs isolate everything"],"answer":1,"explanation":"Security comes from application and infrastructure controls, not from naming or prompting two model configurations differently."},
+      {"q":"What does capability attenuation prevent?","options":["Low confidence","Delegated privilege exceeding authorized parent/request privilege without an explicit trusted grant","Typed artifacts","Out-of-order completion"],"answer":1,"explanation":"Attenuation prevents privilege laundering by ensuring delegation cannot manufacture authority absent from the trusted request and parent."},
+      {"q":"How should handoff state loss be measured?","options":["Ask the model","Compare required structured facts with preserved fields","Count messages","Assume schemas cannot lose data"],"answer":1,"explanation":"Handoff-information recall makes required fact preservation observable without trusting a model's self-report."},
+      {"q":"Why support MULTI_ROUTE and UNKNOWN?","options":["To use more agents","To represent cross-domain and unsupported work without forcing one incorrect destination","To replace authorization","To guarantee accuracy"],"answer":1,"explanation":"Set-valued and unknown results prevent systematic under-routing and unsafe forced classification."},
+      {"q":"When is a deterministic pipeline preferable?","options":["When stages and the completion gate are known","Whenever there are multiple calls","When there are no labels","When debate is unbounded"],"answer":0,"explanation":"Known ordered stages are clearer and more bounded as a pipeline; open-ended coordination must earn its added cost."},
+      {"q":"What can justify an agent split?","options":["One faster sample","A sophisticated diagram","Better success or exposure with grounding, safety, cost, and latency constraints preserved","More model calls"],"answer":2,"explanation":"A valid split needs measured structural benefit and must satisfy the non-regression and operational gates."},
+      {"q":"What does Pareto-optimal mean here?","options":["One hidden composite winner","Not dominated by another architecture across every tracked dimension","Identical metrics","Always parallel"],"answer":1,"explanation":"The Pareto front preserves architectures that represent different quality, latency, cost, grounding, or exposure trade-offs."}
+    ]
   },
   {
     "id": "a2",
