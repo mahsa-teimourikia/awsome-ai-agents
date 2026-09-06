@@ -1602,17 +1602,170 @@ export const questions = [
   {
     "id": "chkpt-single_vs_multi_agent",
     "category": "Advanced",
-    "prompt": "Why is a Multi-Agent architecture preferred over a single \"God Agent\" for complex systems?",
+    "prompt": "When do multiple LLM roles or calls not constitute multiple agents?",
     "options": [
-      "It reduces the total number of API calls.",
-      "It allows you to enforce specialized personas, restrict tool access (Principle of Least Privilege), and prevent prompt dilution.",
-      "It is faster to execute.",
-      "It bypasses OpenAI rate limits."
+      "Whenever the calls use different prompts.",
+      "When application code owns one deterministic pipeline, state, capabilities, and completion rule.",
+      "Whenever a reviewer call follows a producer call.",
+      "Only when every call uses the same model."
     ],
     "correct": [
       1
     ],
-    "explanation": "Refer to the notebook for the detailed explanation.",
+    "explanation": "Multiple calls can be stages in one application-owned pipeline. An agent boundary involves distinct control, capability, context, state, or lifecycle semantics—not merely another prompt.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-manager-vs-handoff",
+    "category": "Advanced",
+    "prompt": "What is the defining control difference between manager delegation and a handoff?",
+    "options": [
+      "A manager always uses more models.",
+      "A handoff is always faster.",
+      "The manager retains final-answer control when calling specialists as tools, while a handoff changes the active owner.",
+      "Only handoffs can return typed artifacts."
+    ],
+    "correct": [2],
+    "explanation": "Manager-style orchestration keeps the manager in control of synthesis. A handoff transfers the active conversation or workflow phase to the receiving specialist.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-parallel-work-clock",
+    "category": "Advanced",
+    "prompt": "Why does parallel specialist work not imply linear wall-clock latency?",
+    "options": [
+      "Parallel calls consume no compute.",
+      "Total work sums every task, while an independent parallel batch contributes roughly its slowest task to the critical path.",
+      "Token use disappears during fan-out.",
+      "Parallel systems cannot encounter rate limits."
+    ],
+    "correct": [1],
+    "explanation": "Aggregate model and tool work remains additive, but independent operations overlap in elapsed time. Queueing, contention, and serialization must still be measured.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-agent-security-boundary",
+    "category": "Advanced",
+    "prompt": "Why is an agent boundary not automatically a security boundary?",
+    "options": [
+      "Agents cannot use tools.",
+      "Agent names and prompts do not enforce credentials, authorization, network isolation, sandboxes, or approvals.",
+      "Security applies only to production writes.",
+      "Typed outputs automatically isolate every agent."
+    ],
+    "correct": [1],
+    "explanation": "Security boundaries are application and infrastructure controls. A different prompt or agent name does not isolate credentials, data, tools, networks, or execution authority.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-capability-attenuation",
+    "category": "Advanced",
+    "prompt": "What does capability attenuation prevent during delegation?",
+    "options": [
+      "Specialists returning low-confidence findings.",
+      "A child receiving broader capability than the authorized request and parent, unless explicit application policy grants it.",
+      "Managers using typed artifacts.",
+      "Parallel tasks finishing out of order."
+    ],
+    "correct": [1],
+    "explanation": "Attenuation prevents privilege laundering: delegation cannot manufacture authority that the parent or current request did not possess without an explicit trusted grant.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-handoff-state-loss",
+    "category": "Advanced",
+    "prompt": "How should state loss during a handoff be measured?",
+    "options": [
+      "Ask the receiving model whether it remembers everything.",
+      "Compare required structured facts with the fields actually preserved and compute handoff-information recall.",
+      "Count the number of messages in the transcript.",
+      "Assume typed artifacts cannot lose information."
+    ],
+    "correct": [1],
+    "explanation": "A required-facts contract makes state preservation observable. Recall is computed from transmitted structured fields rather than self-reported memory or staged prose.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-routing-multi-unknown",
+    "category": "Advanced",
+    "prompt": "Why must a production router support both MULTI_ROUTE and UNKNOWN?",
+    "options": [
+      "They make every request use more agents.",
+      "They represent cross-domain work and unsupported requests without forcing an incorrect single destination.",
+      "They eliminate the need for authorization.",
+      "They guarantee perfect routing accuracy."
+    ],
+    "correct": [1],
+    "explanation": "Set-valued and unknown outcomes prevent systematic under-routing and unsafe forced classification. Policy validation is still required after routing.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-pipeline-not-team",
+    "category": "Advanced",
+    "prompt": "When is a deterministic pipeline preferable to a multi-agent team?",
+    "options": [
+      "When stages, order, artifact contracts, and the completion gate are known in advance.",
+      "Whenever the task has more than one model call.",
+      "Only when no evaluation data exists.",
+      "When specialists should debate without a turn limit."
+    ],
+    "correct": [0],
+    "explanation": "Known stages such as generate, review, revise, and gate are clearer and more bounded as a pipeline. Open-ended coordination must earn its added cost through evaluation.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-split-quality-gate",
+    "category": "Advanced",
+    "prompt": "Which evidence can justify splitting an agent under the course quality gate?",
+    "options": [
+      "Any reduction in one latency sample.",
+      "A more sophisticated-looking architecture diagram.",
+      "Improved success or materially lower privileged exposure, with no grounding or safety regression and cost/latency within limits.",
+      "A larger number of model calls."
+    ],
+    "correct": [2],
+    "explanation": "The gate requires measured structural benefit plus non-regression constraints. One improved metric cannot excuse worse grounding, safety, budget, or SLO performance.",
+    "source": {
+      "label": "Notebook Checkpoint",
+      "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
+    }
+  },
+  {
+    "id": "chkpt-architecture-pareto",
+    "category": "Advanced",
+    "prompt": "What does Pareto-optimal mean when comparing agent architectures?",
+    "options": [
+      "One architecture has the highest score after hiding trade-offs.",
+      "An architecture is not dominated by another that is at least as good on every tracked dimension and better on one.",
+      "Every architecture has identical cost and quality.",
+      "The architecture uses parallel specialists."
+    ],
+    "correct": [1],
+    "explanation": "A Pareto front preserves meaningful trade-offs among quality, grounding, latency, cost, and exposure instead of claiming a universal winner.",
     "source": {
       "label": "Notebook Checkpoint",
       "url": "curriculum/advanced/01-single-vs-multi-agent/single_vs_multi_agent.ipynb"
