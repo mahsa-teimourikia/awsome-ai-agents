@@ -7,7 +7,7 @@ diagnosis into the next incident.
 
 | Learn | Build | Test |
 | --- | --- | --- |
-| **Notebook:** [`10_langgraph_state.ipynb`](10_langgraph_state.ipynb)
+| [Chapter](README.md) | [Guided notebook](10_langgraph_state.ipynb) · [shared implementation](lab.py) | [42 policy invariants](../../../tests/test_langgraph_state_memory.py) |
 
 
 ## Why this topic matters
@@ -23,6 +23,11 @@ abstraction ([LangGraph overview](https://docs.langchain.com/oss/python/langgrap
 The key distinction is not "memory or no memory." It is **what information is
 allowed to persist, under which identity and scope, for how long, and how it is
 validated before it influences an action**.
+
+> **Persistence changes the safety model.** State can outlive the process, model
+> call, deployment, policy version, credentials, and person who started the run.
+> Resume is therefore a new authorization decision over old state—not a fresh run
+> and not automatic permission to continue.
 
 ![Diagram](assets/diagram.svg)
 
@@ -40,6 +45,8 @@ By the end you can:
    raw untrusted content.
 5. Design long-term memory as a governed write → manage → retrieve subsystem,
    rather than a conversational transcript or vector database dump.
+6. Detect schema, graph, policy, approval, retention, and replay changes before
+   old state can influence current execution.
 
 ## The scenario and its boundaries
 
@@ -67,8 +74,10 @@ the schema deliberate:
 | `request`, `service` | identifies this investigation | unrelated user history |
 | `evidence` | auditable inputs to the hypothesis | full raw logs indefinitely |
 | `hypothesis`, `confidence` | makes routing inspectable | hidden chain-of-thought |
-| `attempts`, budget | bounds looping and cost | a global mutable counter |
-| `pending_approval` | makes pause/resume explicit | an implicit UI-only flag |
+| `attempts_by_node`, tool/retry/replan/reflection budgets, deadline | bounds looping and cost across restart | a reset-on-resume counter |
+| `pending_approval` | binds an immutable proposal to the pause | `approved=True` |
+| `approval_audit`, `external_action_receipt_id` | distinguishes validated approval from an executed action | bearer credentials or an implied commit |
+| `state_schema_version`, `graph_version`, `policy_version` | makes compatibility and revalidation explicit | credentials or bearer approval tokens |
 
 ```python
 from typing import TypedDict
@@ -140,16 +149,48 @@ documentation distinguishes SQLite for local development and durable
 alternatives such as PostgreSQL for production. Never derive it directly from
 an email address, tenant name, or other exposed identifier.
 
-### Recovery experiment
+### Durable recovery experiment
 
-1. Run `run_investigation(..., fail_after="collect_evidence")` in the notebook.
-2. Inspect `checkpointer.history(thread_id)`; the health evidence is already
-   saved.
-3. Call `resume_investigation(checkpointer, thread_id)`.
-4. Confirm that the resumed trace does not call the completed health tool again.
+The notebook runs two separate Python processes against one temporary SQLite
+repository. Process one saves health and logs, then exits. Process two creates a
+new repository and runtime, authorizes the same thread, and resumes from the
+stored state. It proves that completed reads are skipped and that `3/5` remaining
+calls become `2/5` only after the next new tool call. Retry, deadline, replan, and
+reflection budgets live in the same persisted state.
 
 This is the difference between recovering a state machine and simply starting a
 fresh chat with a pasted summary.
+
+`SQLiteCheckpointRepository` is a framework-neutral teaching implementation.
+It stores typed JSON plus execution metadata and a digest, enforces a checkpoint
+size budget, and keeps historical records immutable. `InMemorySaver` is useful
+for development/tests and is lost with the process; it is not SQLite. LangGraph's
+SQLite and PostgreSQL savers are separate packages/backends.
+
+Checkpoint lookup is scoped in the storage query by checkpoint ID, trusted
+thread, tenant, and owner. Authorization is checked again after deserialization
+as defense in depth. A missing or differently owned row produces the same
+`CHECKPOINT_NOT_FOUND_OR_DENIED` result so the lookup does not disclose whether
+another tenant's checkpoint exists.
+
+The SHA-256 `state_digest` detects accidental corruption and gives a stable trace
+identity. It is **not** proof of authenticity against an attacker who can rewrite
+both state and digest. Production integrity depends on trusted storage controls
+and, where the threat model requires it, a keyed HMAC or signature.
+
+### Replay-safe reducers and evidence independence
+
+Evidence is compact: stable ID, source/version, timestamp, summary, artifact
+handle, hash, and correlation group. Large logs stay behind the handle. The
+reducer de-duplicates by `evidence_id` and rejects the same ID with a different
+hash. Confidence uses independent correlation groups, so replaying one log item
+cannot masquerade as corroboration.
+
+Conflicting independent root-cause evidence terminates as
+`NEEDS_HUMAN_REVIEW`. Other explicit terminal states include `COMPLETED`,
+`INTERRUPTED`, `BUDGET_EXHAUSTED`, `MIGRATION_REQUIRED`, `CANCELLED`,
+`APPROVED_FOR_EXECUTION`, and `FAILED`. The approval status is not an action
+receipt.
 
 ## 4. Long-term memory needs a write policy
 
@@ -162,23 +203,41 @@ hypothesis ([checkpointer vs store](https://docs.langchain.com/oss/python/langgr
 | --- | --- | --- | --- |
 | Working / short-term | evidence gathered today | graph node | current `thread_id` only |
 | Episodic | approved incident postmortem | reviewed, retention-limited | semantic + temporal match |
-| Semantic | customer's incident-update preference | user confirmed or trusted source | tenant namespace + relevance |
+| Semantic | reviewed fact about a stable service property | reviewed source with provenance | tenant/subject namespace + relevance |
+| Preference | concise incident-update preference | user confirmed | exact tenant + subject |
 | Procedural | verified rollback checklist version | change-controlled artifact | explicit version and access policy |
 
 ![Diagram](assets/diagram_3.svg)
 
-The lab’s `MemoryStore.read_verified()` excludes an unverified Redis hunch. Try
-removing that filter only as an adversarial experiment; the lesson is that a
-plausible, stale memory can distort a decision without being a data leak.
+The lab’s `GovernedMemoryStore.retrieve()` excludes an unverified Redis hunch
+even though it has high semantic relevance. It also excludes cross-tenant,
+expired, superseded, and deleted records. A memory write is accepted only from a
+permitted origin: user-confirmed preference, reviewed postmortem, or approved
+procedure. Retrieved instructions, model hypotheses, authorization claims, and
+temporary credentials are denied. Memory may influence presentation or search
+context; it does not become current-incident evidence without independent
+verification for this run.
+
+`verified=True` is only a claim in a write request. `write()` also requires a
+trusted, application-created `VerifierContext`, checks its tenant, role, scope,
+and identity, and binds `verified_by` to that authenticated verifier. Model output
+cannot self-certify durable memory.
+
+This course chooses **permanent supersession**: after v2 supersedes v1, v1 never
+silently reappears if v2 expires or is soft-deleted. The store retains minimal
+lineage metadata even after eligible content is physically purged. New versions
+must name an existing predecessor with the same tenant, subject, memory type,
+and source lineage, use the next version number, and cannot branch an already
+superseded predecessor.
 
 ### Memory experiment
 
-1. Store a verified Acme preference: “prioritize clear impact updates.”
+1. Store a verified Northstar preference: “prioritize clear impact updates.”
 2. Store an unverified claim: “Checkout problems are usually Redis.”
-3. Run the same evidence collection twice—once with the verification gate, once
-   after deliberately bypassing it.
-4. Explain why the evidence-backed deployment hypothesis should win, and add a
-   policy test that prevents the hunch entering the prompt/context.
+3. Attempt to self-certify a write without `VerifierContext` and observe the
+   deterministic denial.
+4. Explain why the evidence-backed deployment hypothesis wins, and confirm the
+   hunch never enters the incident evidence set.
 
 ## 5. Human interrupts and stateful approval
 
@@ -190,12 +249,12 @@ your application must still enforce who can approve what.
 ```python
 from langgraph.types import Command, interrupt
 
-def approval_node(state: IncidentState):
-    approval = interrupt({"action": "rollback deploy-1842", "evidence": state["evidence"]})
-    return {"approved": bool(approval)}
+def approval_node(state):
+    decision = interrupt(state["safe_review_payload"])
+    return {"approval_decision": decision}
 
-# same thread_id that created the pause
-graph.invoke(Command(resume=True), config=config)
+# The application authenticates the approver and validates the typed decision.
+graph.invoke(Command(resume=validated_decision), config=same_thread_config)
 ```
 
 The notebook simulates this with `pending_approval`; the code block above shows
@@ -204,17 +263,69 @@ the direct LangGraph equivalent. The correct production sequence is:
 1. validate the proposal and required evidence;
 2. checkpoint the proposal and a non-sensitive review payload;
 3. authenticate and authorize the approver in the application layer;
-4. resume with a signed decision and audit record;
-5. perform an idempotent external action only after approval.
+4. verify tenant, approver, action, target, proposal digest, policy version, and
+   expiry against the current state; also require the decision timestamp to fall
+   between proposal creation and expiry and not be in the future;
+5. resume the same authorized thread with `Command(resume=...)`;
+6. perform an idempotent external action only after approval.
+
+The core lab stops after validation and never executes rollback. A decision for
+`deploy-1842` cannot authorize a changed `deploy-1843` proposal; an expired
+decision or a decision arriving after `CANCELLED` is denied. Course 03 owns the
+full executor boundary. Successful validation persists only a non-secret
+`ApprovalAuditReference` and enters `APPROVED_FOR_EXECUTION`; the separate
+`external_action_receipt_id` remains empty.
+
+### Replay and time travel
+
+LangGraph resumes an interrupted node from its beginning, so code before
+`interrupt()` can run again. The notebook contrasts a bad pre-interrupt side
+effect, which commits twice, with a deterministic receipt fixture: the
+`logical_operation_id` remains stable across resume/retry, while every
+`attempt_id` is unique. In this fixture, `ExecutionMode.LIVE` means **simulated
+external-commit semantics only**; no production system is called. See Courses 01
+and 03 for the complete executor pattern.
+
+Time travel is a **fork**, not an edit to historical state. A fork records its
+`parent_checkpoint_id`, receives a new thread/run identity, clears stale
+approval, and defaults to `REPLAY`/`DRY_RUN`, where external writes are disabled.
+Moving a historical fork to `LIVE` requires fresh policy and approval checks.
+
+### Version and retention boundaries
+
+Every resume compares `state_schema_version`, `graph_version`, and the current
+application policy. A schema-v1 checkpoint under a schema-v2 runtime returns
+`MIGRATION_REQUIRED`; an incompatible graph version is rejected; a changed
+policy must be revalidated. Expired or deleted records are unavailable to normal
+retrieval, while audit-retained records cannot be casually deleted. Acquire
+fresh credentials at resume time—never serialize API tokens, passwords,
+temporary cloud credentials, or bearer approval tokens.
+
+Deletion has two stages. A normal delete is a **soft delete**: retrieval is
+blocked immediately, but the payload remains for recovery or audit workflows.
+`purge_expired_or_deleted()` physically removes eligible non-`AUDIT` checkpoint
+or memory payloads after their retention conditions are satisfied. Audit records
+remain governed by their separate retention process. Purge requires the explicit
+scope held by the fixture's trusted retention-worker context, not the ordinary
+operator context. Soft deletion is not physical erasure.
 
 ## 6. Streaming, observability, and evaluation
 
 Streaming is useful for an operator console when it exposes intentional events:
 node name, safe state projection, tool status, interrupt payload, timing, and
 budget. Do not stream raw credentials, unredacted logs, or hidden reasoning.
-LangGraph supports streamed updates, values, messages, and custom events; pair
+LangGraph supports streamed values, updates, messages, custom events,
+checkpoints, tasks, and debug data; pair
 that with trace/evaluation tooling to inspect the trajectory
 ([streaming guide](https://docs.langchain.com/oss/python/langgraph/streaming)).
+
+The shared `StreamEvent` records run/thread/checkpoint correlation, sequence,
+timestamp, node, and type. `project_stream_event()` exposes only node, status,
+elapsed time, and a safe summary. Raw logs, PII, credentials, and hidden reasoning
+remain outside the UI projection. The fixture's small regex check catches a few
+obvious mistakes, but it is intentionally incomplete and is not a production DLP
+system. The primary boundary is constructing a narrow safe projection; production
+systems also need classified schemas, access control, and tested redaction/DLP.
 
 For the Northstar system, test more than the final diagnosis:
 
@@ -226,6 +337,12 @@ For the Northstar system, test more than the final diagnosis:
 | Memory | an unverified or cross-tenant item cannot alter the evidence set |
 | HITL | approval/rejection is persisted, authenticated, and replay-safe |
 | Operations | node count, latency, checkpoint size, retries, and cost remain within budget |
+
+The executable evaluation derives resume success, duplicate-work,
+replay-side-effect, memory-contamination, cross-tenant-memory, stale-approval,
+and stream-redaction rates from observed counters. Checkpoint latency and size
+come from actual saves. The baseline experiment shows why persistence is not
+free but avoids repeating completed tool calls, cost, and latency after restart.
 
 ## Main LangGraph capabilities applied here
 
@@ -239,39 +356,63 @@ For the Northstar system, test more than the final diagnosis:
 | streaming | operator progress and UI | redact and project only safe fields |
 | subgraphs | encapsulate a specialist workflow | define state/store boundary explicitly |
 
+### Technology landscape
+
+| Need | Development/local | Durable production direction |
+| --- | --- | --- |
+| Thread checkpoints | `InMemorySaver` | PostgreSQL or another supported persistent checkpointer |
+| Local durable experiment | separate `langgraph-checkpoint-sqlite` saver | treat SQLite as local/single-process infrastructure |
+| Cross-thread store | `InMemoryStore` | PostgreSQL, MongoDB, Redis, or an application store with explicit namespaces |
+| Serialization | typed state and default safe serializer | encrypted serializer, key management, migrations, and restore tests |
+| Deletion | soft-delete tombstone + explicit purge fixture | retention scheduler, legal hold, purge evidence, and backup lifecycle |
+
+Storage mechanism does not define memory semantics: long-term memory may use KV,
+relational, document, vector, or hybrid retrieval. Namespace and authorize it by
+tenant, subject, and memory type. Production storage also needs encryption at
+rest and in transit, RBAC, tenant isolation, backup/restore, retention,
+deletion, and immutable audit evidence.
+
+Established practice is durable state plus idempotent operations. Current
+LangGraph packages add pluggable checkpointers/stores, interrupts, history, and
+typed streaming. Emerging work explores automated memory extraction and tiered
+memory, but the open problem is still governance: relevance alone does not prove
+truth, scope, consent, or authority.
+
 ## Exercises
 
-1. Add an `evidence_sources` reducer that de-duplicates evidence by source and
-   prove that replaying a node cannot inflate confidence.
-2. Create a `needs_human_review` terminal route when evidence conflicts rather
-   than forcing a diagnosis.
-3. Replace the in-memory checkpointer in the real-LangGraph translation with a
-   local durable saver. Document the retention and deletion policy.
-4. Add tenant identifiers to every store namespace and write a failing test for
-   cross-tenant retrieval.
-5. Stream only `{node, status, elapsed_ms}` to a mock UI and verify that raw log
-   text is absent.
+1. Change a replayed evidence hash while keeping its ID and explain why the
+   reducer fails closed.
+2. Write an explicit state-v1 → state-v2 migration and preserve the old record.
+3. Replace the optional in-memory adapter with `SqliteSaver`; document setup,
+   concurrency, retention, and deletion limits.
+4. Add a reviewed procedural memory and prove it still cannot authorize action.
+5. Add a second independent conflicting source and inspect the terminal route
+   and redacted event stream.
 
 ## Watch For
 
-- **Assumption failure:** The model hallucinates an unsupported parameter.
-- **State leak:** Context is incorrectly preserved across runs.
-- **Timeout:** The tool takes too long and the agent loops.
-- **Auth bypass:** The agent attempts an action it shouldn't.
+- **Thread hijacking:** an opaque `thread_id` is mistaken for authorization.
+- **Schema/graph drift:** old state resumes under incompatible code.
+- **Replayed side effects:** pre-interrupt code commits twice.
+- **Stale approval:** target, evidence, policy, expiry, or approver no longer matches.
+- **Memory poisoning:** a hypothesis or retrieved instruction becomes durable truth.
+- **Cross-tenant memory:** a namespace omits tenant/subject/type boundaries.
+- **Checkpoint growth:** raw logs or transcripts exceed storage budgets.
+- **Persisted secrets:** old credentials survive past their intended lifetime.
+- **Changed policy:** a resume inherits authority that no longer exists.
 
 ## Checkpoint
 
-**1. What is the primary purpose of this module?**
-- A) To understand the core concept.
-- B) To write complex boilerplate.
-- C) To ignore system errors.
-- D) To bypass security.
-
-**2. How do we mitigate the primary failure mode?**
-- A) Retries.
-- B) Human approval.
-- C) Logging.
-- D) Idempotency keys.
+1. How does a checkpoint differ from long-term memory?
+2. Why does knowing a `thread_id` not authorize checkpoint access?
+3. Why can code before a LangGraph interrupt execute again?
+4. What stays stable, and what changes, across a logical retry?
+5. Why are historical checkpoints immutable and time travel represented as a fork?
+6. What should happen when state-schema or graph versions change?
+7. Why can a model hypothesis not automatically become durable memory?
+8. How do tenant, subject, and memory-type namespaces constrain retrieval?
+9. Why must policy and credentials be revalidated on resume?
+10. What data must never appear in persisted state or operator streams?
 
 ## References
 
@@ -280,15 +421,10 @@ For the Northstar system, test more than the final diagnosis:
 - [LangGraph memory concepts](https://docs.langchain.com/oss/python/concepts/memory)
 - [LangGraph interrupts and resume semantics](https://docs.langchain.com/oss/python/langgraph/interrupts)
 - [LangGraph streaming](https://docs.langchain.com/oss/python/langgraph/streaming)
+- [LangGraph time travel](https://docs.langchain.com/oss/python/langgraph/use-time-travel)
 - [LangGraph workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
 - [MemGPT: Towards LLMs as Operating Systems](https://arxiv.org/abs/2310.08560) — useful context for tiered memory, not a substitute for access control or data governance.
 
-## Deep Dives & State of the Art
+## Further Deep Dives
 
-- **[LangGraph Checkpointers & Time Travel](DEEP_DIVE_CHECKPOINTERS.md)**
-
-
-## SOTA Deep Dives
-Explore industry-standard architectural patterns and enterprise implementation details:
-
-- [Checkpointers](DEEP_DIVE_CHECKPOINTERS.md)
+- [LangGraph checkpointers, recovery, and safe time travel](DEEP_DIVE_CHECKPOINTERS.md)

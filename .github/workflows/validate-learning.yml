@@ -32,16 +32,17 @@ jobs:
         run: python -m compileall -q curriculum tests
       - name: Install focused validation dependencies
         run: python -m pip install -e '.[contributor,core]'
-      - name: Test Course 08 and 09 policy invariants
+      - name: Test Course 08, 09, and 10 policy invariants
         env:
           PYTHONPATH: .
-        run: pytest -q tests/test_planning_task_decomposition.py tests/test_agentic_rag.py
-      - name: Execute Course 08 and 09 credential-free notebooks
+        run: pytest -q tests/test_planning_task_decomposition.py tests/test_agentic_rag.py tests/test_langgraph_state_memory.py
+      - name: Execute Course 08, 09, and 10 credential-free notebooks
         env:
           PYTHONPATH: .
         run: |
           python scripts/execute-notebooks.py --timeout 90 curriculum/intermediate/08-planning-task-decomposition
           python scripts/execute-notebooks.py --timeout 90 curriculum/intermediate/09-agentic-rag
+          python scripts/execute-notebooks.py --timeout 90 curriculum/intermediate/10-langgraph-state-memory
 
   test-beginner:
     if: github.event_name == 'pull_request'
