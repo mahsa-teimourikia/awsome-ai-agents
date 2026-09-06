@@ -37,7 +37,8 @@ intermediate = [
 ]
 advanced = [
     "awsome-ai-agents[intermediate]",
-    "pyautogen",
+    "autogen-agentchat==0.7.5",
+    "autogen-ext[openai]==0.7.5",
     "crewai",
     "agentops",
     "mcp",
